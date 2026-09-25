@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>家谱关系核对</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <h1>家谱关系核对</h1>
+    <p class="subtitle">
+      录入成员与「父母 → 子女」关系（每名子女至多两位父母），自动拒绝自指、重复边与祖先环路；
+      每次成功写入都可在顶部「最近操作」中一键撤销（重启后仍可撤销，仅可撤销一次）；
+      选中两人即可沿父母链查询总代数最少的全部共同祖先及最短亲缘路径；
+      还可一键核查全部「辈分矛盾」：同一对祖先与后代沿不同路径的最少 / 最多代数不一致时逐条列出。
+    </p>
+  </header>
+
+  <main class="layout">
+    <!-- 最近操作与撤销 -->
+    <section class="card wide undo-card" aria-labelledby="undo-title">
+      <h2 id="undo-title">最近操作</h2>
+      <div id="undo-box" class="undo-box">
+        <p id="undo-info" class="undo-info"></p>
+        <button type="button" id="undo-button" class="primary">撤销这次操作</button>
+      </div>
+      <p class="empty-hint">
+        每次成功写入都会保存变更前的完整家谱作为唯一可撤销快照（重启后仍可撤销）；
+        撤销会恢复成员 ID、姓名与全部关系原貌、推进版本并清空快照，只能撤销一次。
+      </p>
+    </section>
+
+    <!-- 成员管理 -->
+    <section class="card" aria-labelledby="members-title">
+      <h2 id="members-title">① 成员 <span id="member-count" class="badge">0/30</span></h2>
+      <form id="member-form" class="inline-form">
+        <input type="text" id="member-name" maxlength="50" placeholder="输入姓名，如：张三" autocomplete="off" />
+        <button type="submit">添加</button>
+      </form>
+      <ul id="member-list" class="member-list" aria-live="polite"></ul>
+
+      <!-- 合并重复成员 -->
+      <div id="merge-panel" class="batch-panel">
+        <div class="batch-head">
+          <h3>合并重复成员</h3>
+          <div class="batch-actions">
+            <button type="button" id="merge-preview" class="primary">预览合并</button>
+            <button type="button" id="merge-submit" disabled>确认合并</button>
+          </div>
+        </div>
+        <form id="merge-form" class="merge-form">
+          <label>
+            保留成员（合并后保留其姓名）
+            <select id="merge-keep"></select>
+          </label>
+          <label>
+            被合并成员（合并后删除）
+            <select id="merge-remove"></select>
+          </label>
+        </form>
+        <p id="merge-status" class="batch-status" hidden></p>
+        <div id="merge-result" class="merge-result" hidden></div>
+        <p class="empty-hint" id="merge-empty">
+          成员不足两人时无法合并。选择「保留成员」与「被合并成员」后点击「预览合并」：
+          被合并成员在全部关系中的 ID 将被替换为保留成员并自动去重；
+          若产生自指、某子女超过两位父母或祖先环路，会逐项列出冲突并禁止提交。预览不会修改家谱。
+        </p>
+      </div>
+    </section>
+
+    <!-- 关系管理 -->
+    <section class="card wide" aria-labelledby="edges-title">
+      <h2 id="edges-title">② 父母 → 子女关系</h2>
+      <form id="edge-form" class="edge-form">
+        <label>
+          父母
+          <select id="edge-parent"></select>
+        </label>
+        <span class="arrow" aria-hidden="true">→</span>
+        <label>
+          子女
+          <select id="edge-child"></select>
+        </label>
+        <button type="submit">建立关系</button>
+        <button type="button" id="draft-add">加入批量草稿</button>
+      </form>
+
+      <!-- 批量录入草稿 -->
+      <div id="batch-panel" class="batch-panel">
+        <div class="batch-head">
+          <h3>批量录入草稿 <span id="draft-count" class="badge">0</span></h3>
+          <div class="batch-actions">
+            <button type="button" id="batch-preview" class="primary">预检整批</button>
+            <button type="button" id="batch-submit" disabled>全部合法，提交整批</button>
+            <button type="button" id="batch-clear" class="danger-link">清空草稿</button>
+          </div>
+        </div>
+        <p id="batch-status" class="batch-status" hidden></p>
+        <ol id="draft-list" class="draft-list" aria-live="polite"></ol>
+        <p class="empty-hint" id="draft-empty">
+          草稿为空。在上方选择父母与子女后点击「加入批量草稿」可累计多条；
+          点击「预检整批」查看每条错误及整批可否提交，提交前家谱被他人改动会被拒绝并要求重新预检。
+        </p>
+      </div>
+
+      <h3 class="list-title">已有关系</h3>
+      <ul id="edge-list" class="edge-list" aria-live="polite"></ul>
+    </section>
+
+    <!-- 共同祖先查询 -->
+    <section class="card wide" aria-labelledby="query-title">
+      <h2 id="query-title">③ 共同祖先核对</h2>
+      <form id="query-form" class="edge-form">
+        <label>
+          成员甲
+          <select id="query-a"></select>
+        </label>
+        <span class="arrow" aria-hidden="true">⇄</span>
+        <label>
+          成员乙
+          <select id="query-b"></select>
+        </label>
+        <button type="submit" class="primary">查询共同祖先</button>
+      </form>
+      <div id="query-result" class="result" aria-live="polite">
+        <p class="placeholder">请在上方选择两位成员后点击查询。</p>
+      </div>
+    </section>
+
+    <!-- 辈分矛盾核查 -->
+    <section class="card wide" aria-labelledby="gen-title">
+      <h2 id="gen-title">④ 辈分矛盾核查</h2>
+      <form id="gen-form" class="edge-form">
+        <label>
+          只看与该成员相关的矛盾（祖先或后代，可选）
+          <select id="gen-filter"></select>
+        </label>
+        <button type="submit" class="primary">核查辈分矛盾</button>
+      </form>
+      <p class="empty-hint">
+        对每一对存在祖先关系的成员，沿「父母 → 子女」关系分别求最少与最多代数：
+        两者不等才列为矛盾；同代不同路径（如分别经父系、母系同代到达同一祖先）不报警。
+        查询为只读，成员或关系变更后重新点击核查即可看到最新结果。
+      </p>
+      <div id="gen-result" class="result" aria-live="polite">
+        <p class="placeholder">点击「核查辈分矛盾」开始：将枚举全部祖先—后代对。</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="alert" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
