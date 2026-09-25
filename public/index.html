@@ -13,7 +13,8 @@
       录入成员与「父母 → 子女」关系（每名子女至多两位父母），自动拒绝自指、重复边与祖先环路；
       每次成功写入都可在顶部「最近操作」中一键撤销（重启后仍可撤销，仅可撤销一次）；
       选中两人即可沿父母链查询总代数最少的全部共同祖先及最短亲缘路径；
-      还可一键核查全部「辈分矛盾」：同一对祖先与后代沿不同路径的最少 / 最多代数不一致时逐条列出。
+      还可一键核查全部「辈分矛盾」：同一对祖先与后代沿不同路径的最少 / 最多代数不一致时逐条列出；
+      「变更影响预览」可在不落盘的假设图上试算新增 / 移除一条关系前后辈分矛盾的逐对变化。
     </p>
   </header>
 
@@ -145,6 +146,39 @@
       </p>
       <div id="gen-result" class="result" aria-live="polite">
         <p class="placeholder">点击「核查辈分矛盾」开始：将枚举全部祖先—后代对。</p>
+      </div>
+    </section>
+
+    <!-- 变更影响预览 -->
+    <section class="card wide" aria-labelledby="impact-title">
+      <h2 id="impact-title">⑤ 变更影响预览</h2>
+      <form id="impact-form" class="edge-form">
+        <label>
+          变更类型
+          <select id="impact-action">
+            <option value="add">新增一条父母 → 子女关系</option>
+            <option value="remove">移除一条现有关系</option>
+          </select>
+        </label>
+        <label>
+          父母
+          <select id="impact-parent"></select>
+        </label>
+        <span class="arrow" aria-hidden="true">→</span>
+        <label>
+          子女
+          <select id="impact-child"></select>
+        </label>
+        <button type="submit" class="primary">预览影响</button>
+      </form>
+      <p class="empty-hint">
+        在不落盘的假设图上试算一次「新增 / 移除一条父母→子女关系」：新增沿用成员存在、重复、
+        父母上限与祖先环路校验，失败会说明原因；通过时对比变更前后的辈分矛盾，
+        按祖先与后代成员对列出新增、消失与代数范围变化的矛盾，并展示变化前后各自的最短与最长成员链。
+        预览只读、不写家谱；结果标明所依据的家谱版本，家谱发生写入后会提示重新预览。
+      </p>
+      <div id="impact-result" class="result" aria-live="polite">
+        <p class="placeholder">选择变更类型与父母、子女后点击「预览影响」。</p>
       </div>
     </section>
   </main>

@@ -310,6 +310,11 @@ button.danger-link {
 
 .ancestor-meta .conflict-diff { color: var(--danger); }
 
+/* 变更影响预览 */
+.impact-group { margin-top: 14px; }
+
+.impact-group .list-title { margin: 0 0 10px; }
+
 /* Toast */
 .toast {
   position: fixed;

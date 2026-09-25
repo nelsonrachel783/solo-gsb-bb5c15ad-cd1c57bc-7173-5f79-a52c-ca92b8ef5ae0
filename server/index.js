@@ -3,7 +3,12 @@
 const path = require('path');
 const express = require('express');
 const { createStore } = require('./store');
-const { findCommonAncestors, findGenerationConflicts, validateEdge } = require('./familyGraph');
+const {
+  findCommonAncestors,
+  findGenerationConflicts,
+  validateEdge,
+  previewEdgeImpact,
+} = require('./familyGraph');
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -86,6 +91,60 @@ app.delete('/api/edges', (req, res) => {
   const result = store.deleteEdge(parentId, childId);
   if (result.error) return sendError(res, 404, result.error);
   res.json(store.list());
+});
+
+/**
+ * 变更影响预览（只读，不写入任何数据）：
+ * 以当前家谱为基准，假设「新增一条父母→子女关系」或「移除一条现有关系」，
+ * 构造不落盘的假设图，对比变更前后的辈分矛盾——按祖先与后代成员对列出
+ * 新增、消失与代数范围变化的矛盾，每条给出变化前后两侧的最短与最长成员链
+ * （不是只比较矛盾总数）。
+ * 新增沿用与真实建边完全相同的校验（成员存在、重复、父母上限、祖先环路），
+ * 失败返回 400 并说明原因；移除的目标关系不存在同样返回 400。
+ * 响应携带当前家谱版本 version：页面据此标注「基于版本 N」，
+ * 家谱发生写入后应提示重新预览。
+ * 请求体：{ action: 'add' | 'remove', parentId, childId }
+ */
+app.post('/api/edges/impact/preview', (req, res) => {
+  const result = previewEdgeImpact(store.getState(), {
+    action: req.body && req.body.action,
+    parentId: requireId(req.body, 'parentId') || '',
+    childId: requireId(req.body, 'childId') || '',
+  });
+  if (result.error) return sendError(res, 400, result.error);
+
+  const byId = new Map(store.list().members.map((m) => [m.id, m.name]));
+  const nameOf = (id) => byId.get(id) || '（已删除）';
+  const decorateProfile = (p) =>
+    p && {
+      minGen: p.minGen,
+      maxGen: p.maxGen,
+      shortestPath: p.shortestPath.map((id) => ({ id, name: nameOf(id) })),
+      longestPath: p.longestPath.map((id) => ({ id, name: nameOf(id) })),
+    };
+  const decorateItem = (item) => ({
+    ancestorId: item.ancestorId,
+    ancestorName: nameOf(item.ancestorId),
+    descendantId: item.descendantId,
+    descendantName: nameOf(item.descendantId),
+    before: decorateProfile(item.before),
+    after: decorateProfile(item.after),
+  });
+
+  res.json({
+    version: store.getVersion(),
+    action: result.action,
+    parentId: result.parentId,
+    parentName: nameOf(result.parentId),
+    childId: result.childId,
+    childName: nameOf(result.childId),
+    beforeTotal: result.beforeTotal,
+    afterTotal: result.afterTotal,
+    unchangedCount: result.unchangedCount,
+    added: result.added.map(decorateItem),
+    removed: result.removed.map(decorateItem),
+    changed: result.changed.map(decorateItem),
+  });
 });
 
 /** 为预检结果补上成员姓名（成员可能已在预检前被删除） */

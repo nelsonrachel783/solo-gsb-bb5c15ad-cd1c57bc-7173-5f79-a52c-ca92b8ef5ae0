@@ -27,6 +27,8 @@ const selection = {
   genFilter: '',
   mergeKeep: '',
   mergeRemove: '',
+  impactParent: '',
+  impactChild: '',
 };
 
 let queryStale = false; // 关系被修改后，共同祖先查询结果标记为过期
@@ -37,6 +39,12 @@ let genStale = false; // 成员或关系被修改后，辈分矛盾核查结果�
 let mergePreview = null;
 let mergeStale = false;
 let mergeStaleReason = '';
+
+// 最近一次变更影响预览：{ version, action, parentId, childId, added, removed, changed, ...服务端返回 }
+// 结果保持展示；家谱发生写入或预览条件变化后标记为过期并提示重新预览
+let impactPreview = null;
+let impactStale = false;
+let impactStaleReason = '';
 
 const $ = (id) => document.getElementById(id);
 
@@ -97,6 +105,9 @@ async function refresh() {
   reconcileSelection();
   if (versionChanged && preview && !previewStale) invalidatePreview('家谱已变化，请重新预检');
   if (versionChanged && mergePreview && !mergeStale) invalidateMergePreview('家谱已刷新，请重新预览合并');
+  if (versionChanged && impactPreview && !impactStale) {
+    invalidateImpactPreview('家谱已发生写入，以下预览基于旧版本，请重新预览');
+  }
   render();
 }
 
@@ -110,6 +121,9 @@ function applyStateAndRender(data) {
   reconcileSelection();
   if (versionChanged && preview && !previewStale) invalidatePreview('家谱已变化，请重新预检');
   if (versionChanged && mergePreview && !mergeStale) invalidateMergePreview('家谱已变化，请重新预览合并');
+  if (versionChanged && impactPreview && !impactStale) {
+    invalidateImpactPreview('家谱已发生写入，以下预览基于旧版本，请重新预览');
+  }
   render();
 }
 
@@ -321,6 +335,8 @@ function renderSelects() {
   fillSelect($('gen-filter'), selection.genFilter, '全部成员（不筛选）');
   fillSelect($('merge-keep'), selection.mergeKeep, '选择保留成员');
   fillSelect($('merge-remove'), selection.mergeRemove, '选择被合并成员');
+  fillSelect($('impact-parent'), selection.impactParent, '选择父母');
+  fillSelect($('impact-child'), selection.impactChild, '选择子女');
 }
 
 function fillSelect(select, selectedId, placeholder) {
@@ -352,13 +368,19 @@ function renderStaleBanner() {
     genStale,
     '⚠️ 成员或关系在上次核查后发生过修改，以下结果可能已过期，请重新核查。',
   );
+  renderOneStaleBanner(
+    $('impact-result'),
+    impactStale,
+    `⚠️ ${impactStaleReason || '家谱在上次预览后发生过写入，以下结果可能已过期，请重新预览。'}`,
+  );
 }
 
 function renderOneStaleBanner(box, stale, message) {
   if (!box || !box.dataset.hasResult) return;
   const existing = box.querySelector('.stale-banner');
   if (stale) {
-    if (!existing) box.prepend(el('p', { class: 'stale-banner', text: message }));
+    if (existing) existing.textContent = message;
+    else box.prepend(el('p', { class: 'stale-banner', text: message }));
   } else if (existing) {
     existing.remove();
   }
@@ -411,6 +433,8 @@ function syncSelectionFromForm() {
   selection.genFilter = $('gen-filter').value;
   selection.mergeKeep = $('merge-keep').value;
   selection.mergeRemove = $('merge-remove').value;
+  selection.impactParent = $('impact-parent').value;
+  selection.impactChild = $('impact-child').value;
 }
 
 $('edge-parent').addEventListener('change', syncSelectionFromForm);
@@ -1079,6 +1103,147 @@ $('gen-form').addEventListener('submit', async (e) => {
     toast(err.message, true);
   }
 });
+
+/* ---------------- 变更影响预览 ---------------- */
+
+function invalidateImpactPreview(reason) {
+  impactStale = true;
+  impactStaleReason = reason;
+  renderStaleBanner();
+}
+
+// 预览条件（变更类型 / 父母 / 子女）一旦改变，旧结果立即标记过期
+$('impact-action').addEventListener('change', () => {
+  invalidateImpactPreview('预览条件已修改，以下结果与当前选择不符，请重新预览。');
+});
+$('impact-parent').addEventListener('change', () => {
+  syncSelectionFromForm();
+  invalidateImpactPreview('预览条件已修改，以下结果与当前选择不符，请重新预览。');
+});
+$('impact-child').addEventListener('change', () => {
+  syncSelectionFromForm();
+  invalidateImpactPreview('预览条件已修改，以下结果与当前选择不符，请重新预览。');
+});
+
+/** 预览影响：在不落盘的假设图上试算新增/移除一条关系，对比前后辈分矛盾 */
+$('impact-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  syncSelectionFromForm();
+  const action = $('impact-action').value;
+  const parentId = selection.impactParent;
+  const childId = selection.impactChild;
+  if (!parentId || !childId) { toast('请选择父母与子女', true); return; }
+  if (action === 'add' && parentId === childId) {
+    toast('拒绝自指关系：不能成为自己的父母', true);
+    return;
+  }
+  try {
+    const data = await api('/api/edges/impact/preview', {
+      method: 'POST',
+      body: JSON.stringify({ action, parentId, childId }),
+    });
+    // 请求往返期间选择可能已被改动：结果只对当时的条件快照有效
+    if (
+      action !== $('impact-action').value ||
+      parentId !== selection.impactParent ||
+      childId !== selection.impactChild
+    ) {
+      invalidateImpactPreview('预览条件在预览期间已变化，请重新预览。');
+      return;
+    }
+    impactPreview = data;
+    impactStale = false;
+    impactStaleReason = '';
+    renderImpactResult(data);
+  } catch (err) {
+    // 新增关系校验失败（成员不存在/重复/父母上限/祖先环路）或移除的目标不存在：展示原因
+    toast(err.message, true);
+  }
+});
+
+/** 渲染一侧（变更前 / 变更后）的代际档案：辈分一致、矛盾双链或无祖先关系 */
+function renderImpactProfile(label, profile) {
+  const col = el('div', { class: 'path-col' });
+  if (!profile) {
+    col.appendChild(el('h4', { text: label }));
+    col.appendChild(el('p', { class: 'empty-hint', text: '两人不存在祖先关系。' }));
+    return col;
+  }
+  if (profile.minGen === profile.maxGen) {
+    // 辈分一致：所有路径同代，展示一条成员链即可
+    col.appendChild(el('h4', { text: `${label}（辈分一致，${profile.minGen} 代）` }));
+    col.appendChild(renderGenChainLine(profile.shortestPath, `${profile.minGen} 代`));
+    return col;
+  }
+  col.appendChild(el('h4', { text: `${label}（矛盾：最短 ${profile.minGen} 代 · 最长 ${profile.maxGen} 代）` }));
+  col.appendChild(renderGenChainLine(profile.shortestPath, `最短 ${profile.minGen} 代`));
+  col.appendChild(renderGenChainLine(profile.longestPath, `最长 ${profile.maxGen} 代`));
+  return col;
+}
+
+function renderImpactItem(item) {
+  const block = el('div', { class: 'conflict-block ancestor-block' });
+  block.appendChild(el('h3', {}, [
+    document.createTextNode('「'),
+    el('strong', { text: item.ancestorName }),
+    document.createTextNode('」 → … → 「'),
+    el('strong', { text: item.descendantName }),
+    document.createTextNode('」'),
+  ]));
+  const paths = el('div', { class: 'paths' });
+  paths.appendChild(renderImpactProfile('变更前', item.before));
+  paths.appendChild(renderImpactProfile('变更后', item.after));
+  block.appendChild(paths);
+  return block;
+}
+
+function renderImpactGroup(title, items) {
+  const group = el('div', { class: 'impact-group' });
+  group.appendChild(el('h3', { class: 'list-title', text: `${title}（${items.length} 对）` }));
+  for (const item of items) group.appendChild(renderImpactItem(item));
+  return group;
+}
+
+function renderImpactResult(data) {
+  const box = $('impact-result');
+  box.replaceChildren();
+  box.dataset.hasResult = '1';
+
+  const actionLabel = data.action === 'add' ? '新增' : '移除';
+  const hasDetails = data.added.length > 0 || data.removed.length > 0 || data.changed.length > 0;
+  const summary = el('div', { class: 'summary' });
+  summary.appendChild(el('div', {}, [
+    document.createTextNode(`假设${actionLabel}关系「`),
+    el('strong', { text: data.parentName }),
+    document.createTextNode(' → '),
+    el('strong', { text: data.childName }),
+    document.createTextNode(`」：基于家谱版本 ${data.version} 的假设图试算，未写入家谱。`),
+  ]));
+  summary.appendChild(el('div', {}, [
+    document.createTextNode('辈分矛盾 '),
+    el('strong', { text: `${data.beforeTotal} 对` }),
+    document.createTextNode(' → '),
+    el('strong', { text: `${data.afterTotal} 对` }),
+    document.createTextNode(
+      `（新增 ${data.added.length} · 消失 ${data.removed.length} · ` +
+      `代数范围变化 ${data.changed.length} · 范围不变 ${data.unchangedCount}）` +
+      (hasDetails ? '，逐对明细如下。' : '。'),
+    ),
+  ]));
+  box.appendChild(summary);
+
+  if (!hasDetails) {
+    box.appendChild(el('p', {
+      class: 'empty-hint',
+      text: '该变更不影响任何祖先—后代对的辈分矛盾：逐对对比无新增、消失或代数范围变化。',
+    }));
+    return;
+  }
+
+  if (data.added.length > 0) box.appendChild(renderImpactGroup('新增的矛盾', data.added));
+  if (data.removed.length > 0) box.appendChild(renderImpactGroup('消失的矛盾', data.removed));
+  if (data.changed.length > 0) box.appendChild(renderImpactGroup('代数范围变化的矛盾', data.changed));
+}
 
 /* ---------------- 启动 ---------------- */
 

@@ -469,6 +469,95 @@ function findCommonAncestors(state, idA, idB) {
 }
 
 /**
+ * 计算某位后代全部祖先的「代际档案」（纯函数，不修改 state）。
+ *
+ * 以 descendantId 为起点沿父母链向上：
+ *   - 最少代数 minGen：BFS 首达步数，以及其中一条完整最短成员链；
+ *   - 最多代数 maxGen：DAG 上的最长路（记忆化 DFS），以及一条完整最长成员链。
+ *
+ * 返回 Map: ancestorId -> {
+ *   minGen, maxGen,
+ *   shortestPath: [ancestorId, ..., descendantId],  // 祖先→子女→…→后代
+ *   longestPath:  [ancestorId, ..., descendantId],
+ * }
+ * 后代本人不在结果中；没有任何祖先时返回空 Map。
+ * minGen === maxGen 表示两人辈分一致（所有路径同代，例如经父系、母系同代到达）。
+ */
+function ancestorProfiles(state, descendantId) {
+  const start = descendantId;
+  const profiles = new Map();
+
+  // BFS 向上：最少代数；shortestPrev 记录首达前驱（其子女），便于重建一条最短链
+  const minGenOf = new Map([[start, 0]]);
+  const shortestPrev = new Map([[start, null]]);
+  const queue = [start];
+  for (let head = 0; head < queue.length; head++) {
+    const cur = queue[head];
+    for (const p of state.parentsOf[cur] || []) {
+      if (!minGenOf.has(p)) {
+        minGenOf.set(p, minGenOf.get(cur) + 1);
+        shortestPrev.set(p, cur);
+        queue.push(p);
+      }
+    }
+  }
+  if (minGenOf.size <= 1) return profiles; // 该成员没有任何祖先
+
+  // 子女邻接表：childrenOf[parent] = [child, ...]（沿父母→子女向下）
+  const childrenOf = {};
+  for (const childId of Object.keys(state.parentsOf || {})) {
+    for (const parentId of state.parentsOf[childId] || []) {
+      (childrenOf[parentId] ||= []).push(childId);
+    }
+  }
+
+  // 最多代数：在「start 经父母链可达」的祖先子图（DAG）上做记忆化 DFS。
+  // 向上走的图中边为 子女 → 父母，因此到达祖先 v 的最后一步来自 v 的某个
+  // 同样可达的子女 c：longest(v) = max(longest(c) + 1)，base 为 start = 0。
+  // parentsOf 保证整图为 DAG，递归必然收敛；不可达的子女不参与取 max。
+  const memo = new Map([[start, 0]]);
+  const longestPrev = new Map([[start, null]]);
+  const longest = (v) => {
+    if (memo.has(v)) return memo.get(v);
+    let best = -Infinity;
+    let bestChild = null;
+    for (const c of childrenOf[v] || []) {
+      if (!minGenOf.has(c)) continue; // 不在 start 可达祖先子图内
+      const candidate = longest(c) + 1;
+      if (candidate > best) {
+        best = candidate;
+        bestChild = c;
+      }
+    }
+    memo.set(v, best);
+    longestPrev.set(v, bestChild);
+    return best;
+  };
+
+  // 沿前驱表重建 祖先 → 子女 → … → 后代 的完整成员链
+  const rebuildPath = (prev, ancestorId) => {
+    const path = [ancestorId];
+    let cur = ancestorId;
+    while (cur !== start) {
+      cur = prev.get(cur);
+      path.push(cur);
+    }
+    return path;
+  };
+
+  for (const ancestorId of minGenOf.keys()) {
+    if (ancestorId === start) continue;
+    profiles.set(ancestorId, {
+      minGen: minGenOf.get(ancestorId),
+      maxGen: longest(ancestorId),
+      shortestPath: rebuildPath(shortestPrev, ancestorId),
+      longestPath: rebuildPath(longestPrev, ancestorId),
+    });
+  }
+  return profiles;
+}
+
+/**
  * 辈分矛盾核查（纯函数，不修改 state、不写入任何数据）。
  *
  * 对每一对存在祖先关系的成员（祖先 ancestor、后代 descendant，两人不同），
@@ -500,83 +589,20 @@ function findGenerationConflicts(state, filterId = null) {
   }
   const filtered = !!filterId;
 
-  // 子女邻接表：childrenOf[parent] = [child, ...]（沿父母→子女向下）
-  const childrenOf = {};
-  for (const member of state.members) childrenOf[member.id] = [];
-  for (const childId of Object.keys(state.parentsOf || {})) {
-    for (const parentId of state.parentsOf[childId] || []) {
-      if (childrenOf[parentId]) childrenOf[parentId].push(childId);
-    }
-  }
-
   const all = [];
 
   for (const descendant of state.members) {
-    const start = descendant.id;
-
-    // BFS 向上：最少代数；shortestPrev 记录首达前驱（其子女），便于重建一条最短链
-    const minGenOf = new Map([[start, 0]]);
-    const shortestPrev = new Map([[start, null]]);
-    const queue = [start];
-    for (let head = 0; head < queue.length; head++) {
-      const cur = queue[head];
-      for (const p of state.parentsOf[cur] || []) {
-        if (!minGenOf.has(p)) {
-          minGenOf.set(p, minGenOf.get(cur) + 1);
-          shortestPrev.set(p, cur);
-          queue.push(p);
-        }
-      }
-    }
-    if (minGenOf.size <= 1) continue; // 该成员没有任何祖先
-
-    // 最多代数：在「start 经父母链可达」的祖先子图（DAG）上做记忆化 DFS。
-    // 向上走的图中边为 子女 → 父母，因此到达祖先 v 的最后一步来自 v 的某个
-    // 同样可达的子女 c：longest(v) = max(longest(c) + 1)，base 为 start = 0。
-    // parentsOf 保证整图为 DAG，递归必然收敛；不可达的子女不参与取 max。
-    const memo = new Map([[start, 0]]);
-    const longestPrev = new Map([[start, null]]);
-    const longest = (v) => {
-      if (memo.has(v)) return memo.get(v);
-      let best = -Infinity;
-      let bestChild = null;
-      for (const c of childrenOf[v] || []) {
-        if (!minGenOf.has(c)) continue; // 不在 start 可达祖先子图内
-        const candidate = longest(c) + 1;
-        if (candidate > best) {
-          best = candidate;
-          bestChild = c;
-        }
-      }
-      memo.set(v, best);
-      longestPrev.set(v, bestChild);
-      return best;
-    };
-
-    // 沿前驱表重建 祖先 → 子女 → … → 后代 的完整成员链
-    const rebuildPath = (prev, ancestorId) => {
-      const path = [ancestorId];
-      let cur = ancestorId;
-      while (cur !== start) {
-        cur = prev.get(cur);
-        path.push(cur);
-      }
-      return path;
-    };
-
-    for (const ancestorId of minGenOf.keys()) {
-      if (ancestorId === start) continue;
-      const minGen = minGenOf.get(ancestorId);
-      const maxGen = longest(ancestorId);
-      if (maxGen <= minGen) continue; // 同代不同路径不算矛盾
+    const profiles = ancestorProfiles(state, descendant.id);
+    for (const [ancestorId, p] of profiles) {
+      if (p.maxGen <= p.minGen) continue; // 同代不同路径不算矛盾
       all.push({
         ancestorId,
-        descendantId: start,
-        minGen,
-        maxGen,
-        diff: maxGen - minGen,
-        shortestPath: rebuildPath(shortestPrev, ancestorId),
-        longestPath: rebuildPath(longestPrev, ancestorId),
+        descendantId: descendant.id,
+        minGen: p.minGen,
+        maxGen: p.maxGen,
+        diff: p.maxGen - p.minGen,
+        shortestPath: p.shortestPath,
+        longestPath: p.longestPath,
       });
     }
   }
@@ -595,6 +621,150 @@ function findGenerationConflicts(state, filterId = null) {
   return { total: all.length, filtered, conflicts };
 }
 
+/**
+ * 变更影响预览（纯函数，不修改 state、不写入任何数据）。
+ *
+ * 以当前家谱为基准，假设应用一条变更，构造不落盘的假设图：
+ *   - action 'add'：新增一条 parentId → childId 父母→子女关系。
+ *     沿用与真实建边完全相同的 validateEdge 校验（成员存在、自指、重复边、
+ *     每名子女至多两位父母、祖先环路），校验失败返回 { error } 并说明原因；
+ *   - action 'remove'：移除一条现有关系；关系不存在返回 { error }。
+ *
+ * 随后在「当前图」与「假设图」上分别做辈分矛盾核查，按 祖先|后代 成员对逐对对比
+ * （不是只比较矛盾总数）：
+ *   - added：变更后新出现的矛盾（变更前该对无矛盾：可能本无祖先关系，或辈分一致）；
+ *   - removed：变更后消失的矛盾；
+ *   - changed：变更前后都是矛盾、但 [minGen, maxGen] 代数范围发生变化；
+ *   - 范围完全一致的矛盾计入 unchangedCount，不逐条列出。
+ * 每一条都给出变更前 / 变更后两侧的代际档案（minGen、maxGen 与最短、最长成员链），
+ * 某侧两人不存在祖先关系时该侧为 null。
+ *
+ * 返回 { error } 或 {
+ *   action, parentId, childId,
+ *   beforeTotal, afterTotal, unchangedCount,
+ *   added:   [{ ancestorId, descendantId, before, after }],
+ *   removed: [{ ancestorId, descendantId, before, after }],
+ *   changed: [{ ancestorId, descendantId, before, after }],
+ * }  // before / after 为 { minGen, maxGen, shortestPath, longestPath } 或 null
+ */
+function previewEdgeImpact(state, change) {
+  const action = change && change.action;
+  const parentId = change && typeof change.parentId === 'string' ? change.parentId.trim() : '';
+  const childId = change && typeof change.childId === 'string' ? change.childId.trim() : '';
+
+  if (action !== 'add' && action !== 'remove') {
+    return { error: '不支持的变更类型：仅支持新增（add）或移除（remove）一条父母→子女关系' };
+  }
+  if (!parentId || !childId) return { error: '请选择父母与子女' };
+
+  // 构造假设图：深拷贝父母邻接表后应用变更，当前家谱保持不变
+  const parentsOf = {};
+  for (const [cid, parents] of Object.entries(state.parentsOf || {})) {
+    parentsOf[cid] = [...parents];
+  }
+
+  if (action === 'add') {
+    // 与真实建边完全一致的校验：成员存在、自指、重复、父母上限、祖先环路
+    const check = validateEdge(state, parentId, childId);
+    if (check.error) return { error: check.error };
+    (parentsOf[childId] ||= []).push(parentId);
+  } else {
+    const parents = state.parentsOf[childId] || [];
+    if (!parents.includes(parentId)) {
+      return { error: '关系不存在：当前家谱中没有这条父母→子女关系，无法预览移除' };
+    }
+    parentsOf[childId] = parents.filter((p) => p !== parentId);
+  }
+  const hypoState = { ...state, parentsOf };
+
+  const before = findGenerationConflicts(state);
+  const after = findGenerationConflicts(hypoState);
+
+  const keyOf = (c) => `${c.ancestorId}|${c.descendantId}`;
+  const beforeByKey = new Map(before.conflicts.map((c) => [keyOf(c), c]));
+  const afterByKey = new Map(after.conflicts.map((c) => [keyOf(c), c]));
+
+  // 补全「非矛盾侧」代际档案时按后代缓存祖先档案，避免重复计算
+  const beforeProfiles = new Map(); // descendantId -> ancestorProfiles(state, descendantId)
+  const afterProfiles = new Map(); // descendantId -> ancestorProfiles(hypoState, descendantId)
+  const profileOf = (cache, targetState, ancestorId, descendantId) => {
+    if (!cache.has(descendantId)) {
+      cache.set(descendantId, ancestorProfiles(targetState, descendantId));
+    }
+    return cache.get(descendantId).get(ancestorId) || null;
+  };
+
+  const pick = (c) => ({
+    minGen: c.minGen,
+    maxGen: c.maxGen,
+    shortestPath: c.shortestPath,
+    longestPath: c.longestPath,
+  });
+
+  const added = [];
+  const removed = [];
+  const changed = [];
+  let unchangedCount = 0;
+
+  const keys = new Set([...beforeByKey.keys(), ...afterByKey.keys()]);
+  for (const key of keys) {
+    const b = beforeByKey.get(key);
+    const a = afterByKey.get(key);
+    if (b && a) {
+      if (b.minGen === a.minGen && b.maxGen === a.maxGen) {
+        unchangedCount += 1;
+      } else {
+        changed.push({
+          ancestorId: a.ancestorId,
+          descendantId: a.descendantId,
+          before: pick(b),
+          after: pick(a),
+        });
+      }
+    } else if (a) {
+      added.push({
+        ancestorId: a.ancestorId,
+        descendantId: a.descendantId,
+        before: profileOf(beforeProfiles, state, a.ancestorId, a.descendantId),
+        after: pick(a),
+      });
+    } else {
+      removed.push({
+        ancestorId: b.ancestorId,
+        descendantId: b.descendantId,
+        before: pick(b),
+        after: profileOf(afterProfiles, hypoState, b.ancestorId, b.descendantId),
+      });
+    }
+  }
+
+  // 排序：变化幅度大者优先，同幅度按成员 ID 保证确定性
+  const byIds = (x, y) => {
+    if (x.ancestorId !== y.ancestorId) return x.ancestorId.localeCompare(y.ancestorId);
+    return x.descendantId.localeCompare(y.descendantId);
+  };
+  const diffOf = (p) => p.maxGen - p.minGen;
+  added.sort((x, y) => diffOf(y.after) - diffOf(x.after) || byIds(x, y));
+  removed.sort((x, y) => diffOf(y.before) - diffOf(x.before) || byIds(x, y));
+  changed.sort((x, y) => {
+    const dx = Math.abs(diffOf(x.after) - diffOf(x.before));
+    const dy = Math.abs(diffOf(y.after) - diffOf(y.before));
+    return dy - dx || byIds(x, y);
+  });
+
+  return {
+    action,
+    parentId,
+    childId,
+    beforeTotal: before.total,
+    afterTotal: after.total,
+    unchangedCount,
+    added,
+    removed,
+    changed,
+  };
+}
+
 module.exports = {
   MAX_PARENTS_PER_CHILD,
   MAX_MEMBERS,
@@ -607,5 +777,7 @@ module.exports = {
   previewMergeMembers,
   allShortestPathsUp,
   findCommonAncestors,
+  ancestorProfiles,
   findGenerationConflicts,
+  previewEdgeImpact,
 };
