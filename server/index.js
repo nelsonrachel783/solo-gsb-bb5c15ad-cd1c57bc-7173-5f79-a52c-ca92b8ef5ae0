@@ -88,6 +88,70 @@ app.delete('/api/edges', (req, res) => {
   res.json(store.list());
 });
 
+/** 为变更影响预览的结果补上成员姓名（不写入数据） */
+function decorateImpactResult(result) {
+  const byId = new Map(store.list().members.map((m) => [m.id, m.name]));
+  const nameOf = (id) => byId.get(id) || '（已删除）';
+  const decoratePath = (p) => p.map((id) => ({ id, name: nameOf(id) }));
+  const decorateConflict = (c) => ({
+    ancestorId: c.ancestorId,
+    ancestorName: nameOf(c.ancestorId),
+    descendantId: c.descendantId,
+    descendantName: nameOf(c.descendantId),
+    minGen: c.minGen,
+    maxGen: c.maxGen,
+    diff: c.diff,
+    shortestPath: decoratePath(c.shortestPath),
+    longestPath: decoratePath(c.longestPath),
+  });
+  return {
+    version: store.getVersion(),
+    action: result.action,
+    parentId: result.parentId,
+    parentName: nameOf(result.parentId),
+    childId: result.childId,
+    childName: nameOf(result.childId),
+    beforeTotal: result.beforeTotal,
+    afterTotal: result.afterTotal,
+    unchangedCount: result.unchangedCount,
+    added: result.added.map(decorateConflict),
+    removed: result.removed.map(decorateConflict),
+    changed: result.changed.map((c) => ({
+      ancestorId: c.ancestorId,
+      ancestorName: nameOf(c.ancestorId),
+      descendantId: c.descendantId,
+      descendantName: nameOf(c.descendantId),
+      before: decorateConflict(c.before),
+      after: decorateConflict(c.after),
+    })),
+  };
+}
+
+/**
+ * 变更影响预览（只读，不写入任何数据、不推进版本）：
+ * 以当前家谱构造不落盘的假设图——新增（add）或移除（remove）一条父母→子女关系。
+ * 新增沿用与正式建边完全相同的校验（成员存在、自指、重复边、父母上限、祖先环路），
+ * 失败返回 400 并说明原因；移除要求关系已存在。
+ * 通过后在假设图上重算辈分矛盾，按祖先—后代成员对列出新增（added）、
+ * 消失（removed）与代数范围变化（changed）的矛盾，并给出变化前后对应的
+ * 最短与最长成员链；响应携带所依据的家谱版本 version，家谱被写入后应重新预览。
+ * 请求体：{ action: 'add' | 'remove', parentId, childId }
+ */
+app.post('/api/edges/impact-preview', (req, res) => {
+  const action =
+    req.body && typeof req.body.action === 'string' ? req.body.action.trim() : '';
+  const parentId = requireId(req.body, 'parentId');
+  const childId = requireId(req.body, 'childId');
+  if (action !== 'add' && action !== 'remove') {
+    return sendError(res, 400, '变更类型只能是 add（新增）或 remove（移除）');
+  }
+  if (!parentId || !childId) return sendError(res, 400, '请选择父母与子女');
+
+  const result = store.previewImpact(action, parentId, childId);
+  if (result.error) return sendError(res, 400, result.error);
+  res.json(decorateImpactResult(result));
+});
+
 /** 为预检结果补上成员姓名（成员可能已在预检前被删除） */
 function decorateBatchResult(result) {
   const byId = new Map(store.list().members.map((m) => [m.id, m.name]));

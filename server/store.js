@@ -22,6 +22,7 @@ const {
   validateEdge,
   validateEdgeBatch,
   previewMergeMembers,
+  previewEdgeImpact,
   isReachableUp,
   MAX_MEMBERS,
 } = require('./familyGraph');
@@ -217,6 +218,14 @@ function createStore(filePath) {
   }
 
   /**
+   * 变更影响预览：以当前家谱构造假设图（新增/移除一条父母→子女关系），
+   * 对比假设图与当前家谱的辈分矛盾。纯只读，不写入任何数据、不推进版本。
+   */
+  function previewImpact(action, parentId, childId) {
+    return previewEdgeImpact(state, action, parentId, childId);
+  }
+
+  /**
    * 合并成员提交（乐观锁 + 服务端重算）。
    * 先比对家谱版本，再按与预检完全相同的规则重新计算：
    * 版本变化（409）或仍有冲突（400）时整单拒绝、不修改任何数据；
@@ -268,6 +277,7 @@ function createStore(filePath) {
     commitEdges,
     validateEdgeBatch: (edges) => validateEdgeBatch(state, edges),
     previewMerge,
+    previewImpact,
     commitMerge,
     undoLast,
     getState: () => state,

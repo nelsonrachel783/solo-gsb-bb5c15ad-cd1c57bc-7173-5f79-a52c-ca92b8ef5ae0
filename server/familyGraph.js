@@ -595,6 +595,105 @@ function findGenerationConflicts(state, filterId = null) {
   return { total: all.length, filtered, conflicts };
 }
 
+/**
+ * 变更影响预览（纯函数，不修改 state、不写入任何数据）。
+ *
+ * 以当前家谱构造「假设图」：
+ *   - action = 'add'：假设新增一条 parentId → childId 的父母→子女关系。
+ *     沿用与正式建边完全相同的 validateEdge 校验（成员存在、自指、重复边、
+ *     父母上限、祖先环路），任一不通过即返回 { error } 并说明原因，不产生对比结果。
+ *   - action = 'remove'：假设移除一条现有关系；关系（或成员）不存在时返回 { error }。
+ *
+ * 通过后在假设图上用 findGenerationConflicts 重算辈分矛盾，并与当前家谱
+ * 按「祖先|后代」成员对逐一对比（而不是只比较矛盾总数）：
+ *   - added：仅假设图中存在的矛盾（新增）；
+ *   - removed：仅当前家谱中存在的矛盾（消失）；
+ *   - changed：两边都存在、但最少/最多代数发生变化的矛盾（代数范围变化），
+ *     同时附变更前后的最短与最长成员链。
+ * 总数不变时仍可能有成员对的组成或代数范围变化，因此三类变化都按对列出。
+ *
+ * 返回 { error } 或 {
+ *   error: null, action, parentId, childId,
+ *   beforeTotal, afterTotal, unchangedCount,
+ *   added:   [ conflict ],  // 条目结构与 findGenerationConflicts 相同
+ *   removed: [ conflict ],
+ *   changed: [{ ancestorId, descendantId, before: conflict, after: conflict }],
+ * }
+ */
+function previewEdgeImpact(state, action, parentId, childId) {
+  if (action !== 'add' && action !== 'remove') {
+    return { error: '不支持的变更类型：仅支持新增（add）或移除（remove）一条父母→子女关系' };
+  }
+  if (!hasMember(state, parentId)) return { error: '父母成员不存在' };
+  if (!hasMember(state, childId)) return { error: '子女成员不存在' };
+
+  // 构造假设图的父母邻接表（深拷贝，绝不触碰原 state）
+  const nextParentsOf = {};
+  for (const [cid, parents] of Object.entries(state.parentsOf || {})) {
+    nextParentsOf[cid] = [...parents];
+  }
+
+  if (action === 'add') {
+    // 与正式建边完全一致的校验：自指、重复边、父母上限、祖先环路
+    const check = validateEdge(state, parentId, childId);
+    if (check.error) return check;
+    (nextParentsOf[childId] ||= []).push(parentId);
+  } else {
+    const parents = state.parentsOf[childId] || [];
+    if (!parents.includes(parentId)) {
+      return { error: '关系不存在：无法移除不存在的父母→子女关系' };
+    }
+    nextParentsOf[childId] = parents.filter((p) => p !== parentId);
+  }
+
+  const hypoState = { ...state, parentsOf: nextParentsOf };
+  const before = findGenerationConflicts(state);
+  const after = findGenerationConflicts(hypoState);
+
+  const beforeByKey = new Map(
+    before.conflicts.map((c) => [`${c.ancestorId}|${c.descendantId}`, c]),
+  );
+  const afterByKey = new Map(
+    after.conflicts.map((c) => [`${c.ancestorId}|${c.descendantId}`, c]),
+  );
+
+  // 按 after / before 各自的排序顺序过滤，继承 findGenerationConflicts 的排序
+  const added = [];
+  const changed = [];
+  let unchangedCount = 0;
+  for (const afterC of after.conflicts) {
+    const beforeC = beforeByKey.get(`${afterC.ancestorId}|${afterC.descendantId}`);
+    if (!beforeC) {
+      added.push(afterC);
+    } else if (beforeC.minGen !== afterC.minGen || beforeC.maxGen !== afterC.maxGen) {
+      changed.push({
+        ancestorId: afterC.ancestorId,
+        descendantId: afterC.descendantId,
+        before: beforeC,
+        after: afterC,
+      });
+    } else {
+      unchangedCount += 1;
+    }
+  }
+  const removed = before.conflicts.filter(
+    (c) => !afterByKey.has(`${c.ancestorId}|${c.descendantId}`),
+  );
+
+  return {
+    error: null,
+    action,
+    parentId,
+    childId,
+    beforeTotal: before.total,
+    afterTotal: after.total,
+    unchangedCount,
+    added,
+    removed,
+    changed,
+  };
+}
+
 module.exports = {
   MAX_PARENTS_PER_CHILD,
   MAX_MEMBERS,
@@ -605,6 +704,7 @@ module.exports = {
   validateEdge,
   validateEdgeBatch,
   previewMergeMembers,
+  previewEdgeImpact,
   allShortestPathsUp,
   findCommonAncestors,
   findGenerationConflicts,

@@ -38,6 +38,13 @@ let mergePreview = null;
 let mergeStale = false;
 let mergeStaleReason = '';
 
+// 最近一次变更影响预览：{ version, action, parentId, childId, ...服务端返回 }
+// 仅当 version 与当前家谱版本一致且父母/子女/变更类型选择未改变时有效
+let impactPreview = null;
+let impactStale = false;
+let impactStaleReason = '';
+let impactError = ''; // 预览请求被服务端拒绝（校验失败）时的原因
+
 const $ = (id) => document.getElementById(id);
 
 /** 安全创建 DOM 元素，避免 innerHTML 注入 */
@@ -97,6 +104,9 @@ async function refresh() {
   reconcileSelection();
   if (versionChanged && preview && !previewStale) invalidatePreview('家谱已变化，请重新预检');
   if (versionChanged && mergePreview && !mergeStale) invalidateMergePreview('家谱已刷新，请重新预览合并');
+  if (versionChanged && (impactPreview || impactError) && !impactStale) {
+    invalidateImpactPreview('家谱已变化，请重新预览影响');
+  }
   render();
 }
 
@@ -110,6 +120,9 @@ function applyStateAndRender(data) {
   reconcileSelection();
   if (versionChanged && preview && !previewStale) invalidatePreview('家谱已变化，请重新预检');
   if (versionChanged && mergePreview && !mergeStale) invalidateMergePreview('家谱已变化，请重新预览合并');
+  if (versionChanged && (impactPreview || impactError) && !impactStale) {
+    invalidateImpactPreview('家谱已变化，请重新预览影响');
+  }
   render();
 }
 
@@ -140,6 +153,7 @@ function render() {
   renderSelects();
   renderDrafts();
   renderMerge();
+  renderImpact();
   renderStaleBanner();
   renderUndo();
 }
@@ -413,8 +427,15 @@ function syncSelectionFromForm() {
   selection.mergeRemove = $('merge-remove').value;
 }
 
-$('edge-parent').addEventListener('change', syncSelectionFromForm);
-$('edge-child').addEventListener('change', syncSelectionFromForm);
+// 变更影响预览复用「父母 / 子女」选择器：选择一变，旧预览立即失效
+$('edge-parent').addEventListener('change', () => {
+  syncSelectionFromForm();
+  invalidateImpactPreview('父母或子女选择已改变，请重新预览影响');
+});
+$('edge-child').addEventListener('change', () => {
+  syncSelectionFromForm();
+  invalidateImpactPreview('父母或子女选择已改变，请重新预览影响');
+});
 $('query-a').addEventListener('change', syncSelectionFromForm);
 $('query-b').addEventListener('change', syncSelectionFromForm);
 $('gen-filter').addEventListener('change', syncSelectionFromForm);
@@ -854,6 +875,215 @@ function renderMergeResult(box, data) {
     edgeBox.appendChild(list);
   }
   box.appendChild(edgeBox);
+}
+
+/* ---------------- 变更影响预览 ---------------- */
+
+function invalidateImpactPreview(reason) {
+  impactPreview = null;
+  impactError = '';
+  impactStale = true;
+  impactStaleReason = reason;
+  renderImpact();
+}
+
+/** 预览是否对应当前父母/子女/变更类型选择且版本未变 */
+function impactPreviewLive() {
+  if (!impactPreview || impactStale) return false;
+  if (impactPreview.version !== state.version) return false;
+  if (impactPreview.parentId !== selection.edgeParent) return false;
+  if (impactPreview.childId !== selection.edgeChild) return false;
+  if (impactPreview.action !== impactActionValue()) return false;
+  return true;
+}
+
+function impactActionValue() {
+  return $('impact-action').value === 'remove' ? 'remove' : 'add';
+}
+
+/** 预览影响：以当前家谱构造不落盘假设图，逐对对比辈分矛盾（不写入数据） */
+async function previewImpact() {
+  syncSelectionFromForm();
+  const action = impactActionValue();
+  const parentId = selection.edgeParent;
+  const childId = selection.edgeChild;
+  if (!parentId || !childId) { toast('请选择父母与子女', true); return; }
+
+  const status = $('impact-status');
+  status.hidden = false;
+  status.className = 'batch-status info';
+  status.textContent = '预览中…（基于假设图，不会修改家谱）';
+  impactError = '';
+  try {
+    const data = await api('/api/edges/impact-preview', {
+      method: 'POST',
+      body: JSON.stringify({ action, parentId, childId }),
+    });
+    // 请求往返期间选择可能已被改动：结果只对当时的选择快照有效
+    if (
+      parentId !== selection.edgeParent ||
+      childId !== selection.edgeChild ||
+      action !== impactActionValue()
+    ) {
+      invalidateImpactPreview('选择在预览期间已变化，请重新预览影响');
+      return;
+    }
+    impactPreview = data;
+    impactStale = false;
+    impactStaleReason = '';
+    renderImpact();
+  } catch (err) {
+    // 校验失败（成员不存在、重复边、父母上限、祖先环路、关系不存在等）：在面板说明原因
+    impactPreview = null;
+    impactStale = false;
+    impactStaleReason = '';
+    impactError = err.message;
+    renderImpact();
+  }
+}
+
+$('impact-preview').addEventListener('click', previewImpact);
+$('impact-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  previewImpact();
+});
+$('impact-action').addEventListener('change', () => {
+  invalidateImpactPreview('变更类型已改变，请重新预览影响');
+});
+
+function renderImpact() {
+  const empty = $('impact-empty');
+  const status = $('impact-status');
+  const result = $('impact-result');
+  const previewBtn = $('impact-preview');
+
+  if (state.members.length < 2) {
+    empty.hidden = false;
+    status.hidden = true;
+    result.hidden = true;
+    previewBtn.disabled = true;
+    return;
+  }
+  empty.hidden = true;
+  previewBtn.disabled = false;
+
+  // 服务端拒绝（校验失败）：面板上说明原因
+  if (impactError) {
+    result.hidden = true;
+    status.hidden = false;
+    status.className = 'batch-status error';
+    status.textContent = `无法预览：${impactError}（假设图未建立，家谱未修改）`;
+    return;
+  }
+
+  if (!impactPreviewLive()) {
+    result.hidden = true;
+    status.hidden = false;
+    status.className = 'batch-status warn';
+    status.textContent =
+      impactStaleReason || '尚未预览，或预览结果已失效：选择父母、子女与变更类型后点击「预览影响」。';
+    return;
+  }
+
+  status.hidden = false;
+  result.hidden = false;
+  renderImpactResult(result, impactPreview);
+
+  const d = impactPreview;
+  const changedPairs = d.added.length + d.removed.length + d.changed.length;
+  if (changedPairs === 0) {
+    status.className = 'batch-status ok';
+    status.textContent =
+      `预览通过（基于家谱版本 ${d.version}）：该变更不会引起任何辈分矛盾变化，` +
+      `变更前后均为 ${d.beforeTotal} 对（逐对相同、代数范围也一致）。`;
+  } else {
+    status.className = 'batch-status warn';
+    status.textContent =
+      `预览通过（基于家谱版本 ${d.version}）：辈分矛盾 ${d.beforeTotal} 对 → ${d.afterTotal} 对，` +
+      `新增 ${d.added.length} 对、消失 ${d.removed.length} 对、代数范围变化 ${d.changed.length} 对、` +
+      `不变 ${d.unchangedCount} 对。以下按祖先—后代成员对逐对列出（非只比较总数）：`;
+  }
+}
+
+function renderImpactResult(box, data) {
+  box.replaceChildren();
+
+  const actionText = data.action === 'add' ? '新增' : '移除';
+  box.appendChild(el('p', { class: 'ancestor-meta' }, [
+    document.createTextNode('假设变更（'),
+    el('strong', { text: `家谱版本 ${data.version}` }),
+    document.createTextNode('，不落盘）：'),
+    el('strong', { text: actionText }),
+    document.createTextNode('关系 '),
+    el('span', { class: 'p-name', text: data.parentName }),
+    document.createTextNode(' → '),
+    el('span', { class: 'c-name', text: data.childName }),
+  ]));
+
+  if (data.added.length === 0 && data.removed.length === 0 && data.changed.length === 0) {
+    box.appendChild(el('p', {
+      class: 'empty-hint',
+      text: '假设图与当前家谱的辈分矛盾逐对相同，每对的最少/最多代数范围也没有变化。',
+    }));
+    return;
+  }
+
+  if (data.added.length > 0) {
+    const group = el('div', { class: 'impact-group added' });
+    group.appendChild(el('h4', { text: `新增的矛盾（${data.added.length} 对，变更后才出现）` }));
+    for (const c of data.added) group.appendChild(renderConflictBlock(c));
+    box.appendChild(group);
+  }
+  if (data.removed.length > 0) {
+    const group = el('div', { class: 'impact-group removed' });
+    group.appendChild(el('h4', { text: `消失的矛盾（${data.removed.length} 对，变更后不再构成矛盾）` }));
+    for (const c of data.removed) group.appendChild(renderConflictBlock(c));
+    box.appendChild(group);
+  }
+  if (data.changed.length > 0) {
+    const group = el('div', { class: 'impact-group changed' });
+    group.appendChild(el('h4', { text: `代数范围变化的矛盾（${data.changed.length} 对，仍为矛盾但代数变了）` }));
+    for (const c of data.changed) group.appendChild(renderImpactChangedBlock(c));
+    box.appendChild(group);
+  }
+}
+
+/** 代数范围变化的矛盾：变更前后两列，分别给出最短、最长完整成员链 */
+function renderImpactChangedBlock(c) {
+  const block = el('div', { class: 'conflict-block ancestor-block' });
+  block.appendChild(el('h3', {}, [
+    document.createTextNode('「'),
+    el('strong', { text: c.ancestorName }),
+    document.createTextNode('」 → … → 「'),
+    el('strong', { text: c.descendantName }),
+    document.createTextNode('」'),
+  ]));
+  block.appendChild(el('p', { class: 'ancestor-meta' }, [
+    document.createTextNode('代数范围 '),
+    el('strong', { text: `最短 ${c.before.minGen} / 最长 ${c.before.maxGen} 代` }),
+    document.createTextNode(' → '),
+    el('strong', { class: 'conflict-diff', text: `最短 ${c.after.minGen} / 最长 ${c.after.maxGen} 代` }),
+    document.createTextNode(`（代数差 ${c.before.diff} → ${c.after.diff}）`),
+  ]));
+
+  const paths = el('div', { class: 'paths' });
+  const colBefore = el('div', { class: 'path-col' }, [
+    el('h4', { text: `变更前（${c.before.minGen}–${c.before.maxGen} 代）` }),
+    el('p', { class: 'empty-hint', text: '最短成员链' }),
+    renderGenChainLine(c.before.shortestPath, `${c.before.minGen} 代`),
+    el('p', { class: 'empty-hint', text: '最长成员链' }),
+    renderGenChainLine(c.before.longestPath, `${c.before.maxGen} 代`),
+  ]);
+  const colAfter = el('div', { class: 'path-col' }, [
+    el('h4', { text: `变更后（${c.after.minGen}–${c.after.maxGen} 代）` }),
+    el('p', { class: 'empty-hint', text: '最短成员链' }),
+    renderGenChainLine(c.after.shortestPath, `${c.after.minGen} 代`),
+    el('p', { class: 'empty-hint', text: '最长成员链' }),
+    renderGenChainLine(c.after.longestPath, `${c.after.maxGen} 代`),
+  ]);
+  paths.append(colBefore, colAfter);
+  block.appendChild(paths);
+  return block;
 }
 
 /* ---------------- 共同祖先查询结果渲染 ---------------- */

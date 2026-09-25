@@ -13,7 +13,8 @@
       录入成员与「父母 → 子女」关系（每名子女至多两位父母），自动拒绝自指、重复边与祖先环路；
       每次成功写入都可在顶部「最近操作」中一键撤销（重启后仍可撤销，仅可撤销一次）；
       选中两人即可沿父母链查询总代数最少的全部共同祖先及最短亲缘路径；
-      还可一键核查全部「辈分矛盾」：同一对祖先与后代沿不同路径的最少 / 最多代数不一致时逐条列出。
+      还可一键核查全部「辈分矛盾」：同一对祖先与后代沿不同路径的最少 / 最多代数不一致时逐条列出；
+      建立或删除关系前可先做「变更影响预览」：在不落盘的假设图上逐对对比辈分矛盾的新增、消失与代数范围变化。
     </p>
   </header>
 
@@ -101,6 +102,34 @@
         <p class="empty-hint" id="draft-empty">
           草稿为空。在上方选择父母与子女后点击「加入批量草稿」可累计多条；
           点击「预检整批」查看每条错误及整批可否提交，提交前家谱被他人改动会被拒绝并要求重新预检。
+        </p>
+      </div>
+
+      <!-- 变更影响预览 -->
+      <div id="impact-panel" class="batch-panel">
+        <div class="batch-head">
+          <h3>变更影响预览</h3>
+          <div class="batch-actions">
+            <button type="button" id="impact-preview" class="primary">预览影响</button>
+          </div>
+        </div>
+        <form id="impact-form" class="merge-form">
+          <label>
+            变更类型（父母与子女沿用上方选择器）
+            <select id="impact-action">
+              <option value="add">新增该父母 → 子女关系</option>
+              <option value="remove">移除该父母 → 子女关系</option>
+            </select>
+          </label>
+        </form>
+        <p id="impact-status" class="batch-status" hidden></p>
+        <div id="impact-result" class="merge-result" hidden></div>
+        <p class="empty-hint" id="impact-empty">
+          成员不足两人时无法预览。在上方选择父母与子女、在此选择变更类型后点击「预览影响」：
+          以当前家谱构造不落盘的假设图——新增关系沿用成员存在、重复、父母上限与祖先环路校验，
+          失败会说明原因；通过后在假设图上重算辈分矛盾，按祖先—后代成员对列出新增、消失与
+          代数范围变化的矛盾，并展示变化前后对应的最短与最长成员链。
+          预览标明所依据的家谱版本，不会修改家谱；家谱被写入后需重新预览。
         </p>
       </div>
 

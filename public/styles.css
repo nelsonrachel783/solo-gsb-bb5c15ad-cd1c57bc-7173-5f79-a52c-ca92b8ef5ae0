@@ -498,3 +498,21 @@ button.danger-link {
 }
 
 .merge-conflicts li { margin-bottom: 2px; }
+
+/* 变更影响预览 */
+.impact-group { margin-top: 12px; }
+
+.impact-group > h4 {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.impact-group.added > h4 { color: #991b1b; background: var(--warn-bg); border: 1px solid var(--warn-border); }
+.impact-group.removed > h4 { color: #065f46; background: var(--ok-bg); border: 1px solid var(--ok-border); }
+.impact-group.changed > h4 { color: #92400e; background: #fffbeb; border: 1px solid #fcd34d; }
+
+.impact-group .conflict-block { margin-bottom: 10px; }
+.impact-group.added .conflict-block { border-color: var(--warn-border); }
+.impact-group.removed .conflict-block { border-color: var(--ok-border); }
